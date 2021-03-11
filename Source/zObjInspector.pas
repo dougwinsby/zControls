@@ -48,6 +48,7 @@ uses
   zCanvasStack,
   zRecList,
   zUtils,
+  zAttributes,
 {$IFDEF CUSTOMFLOATCONV}
   FloatConv,
 {$ENDIF}
@@ -113,6 +114,7 @@ type
     CategoryIndex: Integer;
   private
     FVisible: Boolean;
+    FCustomAttrs: TPropAttrs;
     FQName: String;
     FItems: TPropList;
     function GetCount: Integer;
@@ -126,6 +128,11 @@ type
     function GetVisible: Boolean;
     procedure CheckItemsList;
     function GetComponentRoot: TCustomForm;
+    function GetAttrCategory: String;
+    function GetAttrReadOnly: Boolean;
+    function GetAttrHint: String;
+    function GetAttrName: String;
+    function GetAttrStripPrefix: String;
   public
     function EqualTo(A: PPropItem): Boolean;
     function IsEmpty: Boolean;
@@ -146,6 +153,11 @@ type
     property Name: String read GetName;
     property ValueName: String read GetValueName;
     property Visible: Boolean read GetVisible;
+    property AttrReadOnly: Boolean read GetAttrReadOnly;
+    property AttrCategory: String read GetAttrCategory;
+    property AttrName: String read GetAttrName;
+    property AttrHint: String read GetAttrHint;
+    property AttrStripPrefix: String read GetAttrStripPrefix;
   end;
 
   TPropList = class(TzRecordList<TPropItem, PPropItem>)
@@ -809,7 +821,10 @@ begin
   Result := MulDiv(Value, 96, FCurrentPPI);
 end;
 
+{$region 'utility functions'}
+
 { =============>Utils<============= }
+
 function GetMethodName(Value: TValue; Obj: TObject): String;
 begin
   Result := '';
@@ -987,6 +1002,16 @@ begin
     Result := GetParentForm(TControl(Comp));
 end;
 
+function StripPrefix(const s, prefix: string): string;
+begin
+  if s.StartsWith(prefix) then
+    result := s.Remove(0, prefix.Length)
+  else
+    result := s;
+end;
+
+{$endregion}
+
 { TPropList }
 
 procedure TPropList.FreeRecord(P: Pointer);
@@ -1034,6 +1059,50 @@ function TPropItem.EqualTo(A: PPropItem): Boolean;
 begin
   Result := @Self = A;
 end;
+
+{$region 'Custom Attribute getters'}
+
+function TPropItem.GetAttrCategory: String;
+begin
+  if FCustomAttrs.Loaded then
+    result := FCustomAttrs.AttrCategory
+  else
+    result := '';
+end;
+
+function TPropItem.GetAttrHint: String;
+begin
+  if FCustomAttrs.Loaded then
+   result := FCustomAttrs.AttrHint
+ else
+   result := '';
+end;
+
+function TPropItem.GetAttrName: String;
+begin
+  if FCustomAttrs.Loaded then
+   result := FCustomAttrs.AttrName
+ else
+   result := '';
+end;
+
+function TPropItem.GetAttrReadOnly: Boolean;
+begin
+  if FCustomAttrs.Loaded then
+    result := FCustomAttrs.AttrReadOnly
+  else
+    result := false;
+end;
+
+function TPropItem.GetAttrStripPrefix: String;
+begin
+  if FCustomAttrs.Loaded then
+   result := FCustomAttrs.AttrStripPrefix
+ else
+   result := '';
+end;
+
+{$endregion}
 
 function TPropItem.GetComponentRoot: TCustomForm;
 begin
@@ -1216,6 +1285,9 @@ end;
 function TPropItem.GetValueName: String;
 begin
   Result := DefaultValueManager.GetValueName(@Self);
+  // check for custom attribute which changes name 
+  if AttrStripPrefix <> '' then                      
+    Result := StripPrefix(Result, AttrStripPrefix); 
 end;
 
 function TPropItem.GetVisible: Boolean;
@@ -1446,6 +1518,9 @@ begin
 end;
 
 procedure TzObjInspectorBase.ComponentChanged;
+var
+  i: integer;
+  P: PPropItem;
 begin
   FCategory.Clear;
   FCategory.Add(FDefaultCategoryName);
@@ -1463,6 +1538,14 @@ begin
     FComponentClassType := TRttiInstanceType(FRttiType).MetaclassType;
   end;
   Changed;
+
+  // Set Categories from Custom Attributes              
+  for i := 0 to FItems.Count-1 do                            
+  begin                                                       
+    P := FItems.Items[i];                                    
+    if P^.AttrCategory <> '' then                             
+      RegisterPropertyInCategory(P^.AttrCategory, P^.Name);    
+  end;                                                        
 end;
 
 procedure TzObjInspectorBase.SetComponent(Value: TObject);
@@ -1668,6 +1751,7 @@ var
         PItem^.Parent := AParent;
         PItem^.Prop := LProp;
         PItem^.FQName := LQName;
+        PItem^.FCustomAttrs := GetCustomAttributes(LProp); 
         if FSortByCategory then
           PItem^.FVisible := False
         else
@@ -3139,7 +3223,13 @@ begin
     if Assigned(OnGetItemFriendlyName) then
       PropName := OnGetItemFriendlyName(Self, PItem)
     else
-      PropName := PItem.Name;
+    begin
+      // custom attribute override?
+      if PItem^.AttrName <> '' then 
+        PropName := PItem^.AttrName 
+      else                                
+        PropName := PItem.Name;
+    end;                                  
 
     X := pOrdPos + 4;
     if FShowGridLines then
@@ -3173,7 +3263,8 @@ begin
     if IsPropTypeDerivedFromClass(PItem^.Prop.PropertyType, TComponent) then
       Canvas.Font.Color := FReferencesColor;
 
-    if (not PItem.Prop.IsWritable) and (not PItem^.IsClass) then
+    if ((not PItem.Prop.IsWritable) or (PItem^.AttrReadOnly)) 
+      and (not PItem^.IsClass) then
       Canvas.Font.Color := FReadOnlyColor;
 
     Canvas.Refresh;
@@ -3757,7 +3848,8 @@ begin
   if not FTxtChanged then
     Exit;
   FTxtChanged := False;
-  if (ReadOnly) or (FPropItem^.IsSet) or (not FPropItem^.Prop.IsWritable) then
+  if (ReadOnly) or (FPropItem^.IsSet) or (not FPropItem^.Prop.IsWritable)
+    or (FPropItem^.AttrReadOnly) then                                       
     Exit;
 
   s := Text;
@@ -3833,7 +3925,8 @@ begin
   else
   begin
     ReadOnly := not FPropItem^.Prop.IsWritable;
-    if (FPropItem^.IsSet) or (FPropItem^.IsClass) then
+    if (FPropItem^.IsSet) or (FPropItem^.IsClass)
+      or (FPropItem^.AttrReadOnly) then                          
       ReadOnly := True;
   end;
   if not ReadOnly then
@@ -4281,6 +4374,8 @@ var
   Value: TValue;
   i: Integer;
   Root: TCustomForm;
+  ValueName: string;
+
   procedure GetMethodsItems;
   var
     LCtx: TRttiContext;
@@ -4334,7 +4429,13 @@ begin
   if PItem.Prop.PropertyType.IsOrdinal then
   begin
     for i := Value.TypeData.MinValue to Value.TypeData.MaxValue do
-      Items.AddObject(GetEnumName(Value.TypeInfo, i), TObject(i));
+    begin
+      ValueName := GetEnumName(Value.TypeInfo, i);
+      // custom attribute can strip prefix from value (enums)  
+      if PItem^.AttrStripPrefix <> '' then                                  
+        ValueName := StripPrefix(ValueName, PItem^.AttrStripPrefix);       
+      Items.AddObject(ValueName, TObject(i));
+    end;
     Exit;
   end;
 end;
@@ -4490,6 +4591,12 @@ begin
     Result := '';
     if not Value.IsEmpty then
     begin
+      // can override object type being displayed 
+      if PItem^.AttrHint <> '' then               
+      begin                                      
+        result := PItem^.AttrHint;             
+        Exit;                                   
+      end;                                      
       LObj := GetValueAs<TObject>(Value);
       Result := Format('(%s)', [LObj.ToString]);
       if (LObj is TComponent) then
@@ -4614,7 +4721,6 @@ begin
           Exit(True)
         else if PItem.Value.AsObject is TGraphic then
           Exit(True);
-
       end;
     vtColor, vtFont, vtIcon:
       begin
@@ -4693,7 +4799,6 @@ begin
 
   LQName := PItem^.FQName;
   ValueName := PItem^.ValueName;
-
   LColor := LInspector.FValueColor;
   if LInspector.UseStyleColor then
     LColor := StyleServices.GetSystemColor(clBtnText);
